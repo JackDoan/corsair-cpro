@@ -263,7 +263,7 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
         break;
     case hwmon_curr:
         switch (attr) {
-            case hwmon_in_input:
+            case hwmon_curr_input:
                 ret = get_electric_data(hxi, hxi->rails[channel].sensor, hxi->rails[channel].amp_cmd);
                 if (ret < 0) {
                     return ret;
@@ -276,7 +276,7 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
         break;
     case hwmon_power:
             switch (attr) {
-                case hwmon_in_input:
+                case hwmon_power_input:
                     ret = get_electric_data(hxi, hxi->rails[channel].sensor, hxi->rails[channel].power_cmd);
                     if (ret < 0) {
                         return ret;
@@ -288,25 +288,6 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
             }
             break;
 
-//	case hwmon_fan:
-//		switch (attr) {
-//		case hwmon_fan_input:
-//			ret = -1; //get_electric_data(hxi, CTL_GET_FAN_RPM, channel, true);
-//			if (ret < 0)
-//				return ret;
-//			*val = ret;
-//			return 0;
-//		case hwmon_fan_target:
-//			/* how to read target values from the device is unknown */
-//			/* driver returns last set value or 0			*/
-//			if (hxi->target[channel] < 0)
-//				return -ENODATA;
-//			*val = hxi->target[channel];
-//			return 0;
-//		default:
-//			break;
-//		}
-//		break;
 //	case hwmon_pwm:
 //		switch (attr) {
 //		case hwmon_pwm_input:
@@ -329,13 +310,12 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
 
 static int hxi_write(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long val)
 {
-	struct hxi_device *hxi = dev_get_drvdata(dev);
-
+	//struct hxi_device *hxi = dev_get_drvdata(dev);
 	switch (type) {
 	case hwmon_fan:
 		switch (attr) {
 		case hwmon_fan_target:
-			return -1; //set_target(hxi, channel, val);
+			return -EOPNOTSUPP;
 		default:
 			break;
 		}
@@ -343,7 +323,6 @@ static int hxi_write(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 	default:
 		break;
 	}
-
 	return -EOPNOTSUPP;
 };
 
@@ -377,15 +356,15 @@ static const struct hwmon_channel_info *hxi_info[] = {
                     HWMON_I_INPUT | HWMON_I_LABEL
                     ),
     HWMON_CHANNEL_INFO(curr,
-                       HWMON_I_INPUT | HWMON_I_LABEL,
-                       HWMON_I_INPUT | HWMON_I_LABEL,
-                       HWMON_I_INPUT | HWMON_I_LABEL
+                       HWMON_C_INPUT | HWMON_C_LABEL,
+                       HWMON_C_INPUT | HWMON_C_LABEL,
+                       HWMON_C_INPUT | HWMON_C_LABEL
     ),
     HWMON_CHANNEL_INFO(power,
-                       HWMON_I_INPUT | HWMON_P_LABEL,
-                       HWMON_I_INPUT | HWMON_P_LABEL,
-                       HWMON_I_INPUT | HWMON_P_LABEL,
-                       HWMON_I_INPUT | HWMON_P_LABEL
+                       HWMON_P_INPUT | HWMON_P_LABEL,
+                       HWMON_P_INPUT | HWMON_P_LABEL,
+                       HWMON_P_INPUT | HWMON_P_LABEL,
+                       HWMON_P_INPUT | HWMON_P_LABEL
     ),
 	NULL
 };
