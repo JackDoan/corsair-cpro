@@ -1,4 +1,4 @@
-obj-m := corsair-cpro.o
+obj-m := corsair-hxi-psu.o
 
 
 ifndef KERNELRELEASE
@@ -11,8 +11,7 @@ KDIR := /usr/lib/modules/$(KRELEASE)/build
 PWD := $(shell pwd)
 
 
-default:
-
+all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
