@@ -11,8 +11,7 @@ KDIR := /usr/lib/modules/$(KRELEASE)/build
 PWD := $(shell pwd)
 
 
-default:
-
+all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:

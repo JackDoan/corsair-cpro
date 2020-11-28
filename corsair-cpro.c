@@ -27,52 +27,89 @@
 #define LABEL_LENGTH		11
 #define REQ_TIMEOUT		300
 
-#define CTL_GET_TMP_CNCT	0x10	/*
-					 * returns in bytes 1-4 for each temp sensor:
-					 * 0 not connected
-					 * 1 connected
-					 */
-#define CTL_GET_TMP		0x11	/*
+
+
+#define NUM_FANS		6
+#define NUM_TEMP_SENSORS	4
+
+enum ccp_cmd {
+    CTL_GET_TMP_CNCT=0x10, /* returns in bytes 1-4 for each temp sensor:, 0 not connected, 1 connected */
+
+    CTL_GET_TMP=0x11,	/*
 					 * send: byte 1 is channel, rest zero
 					 * rcv:  returns temp for channel in centi-degree celsius
 					 * in bytes 1 and 2
 					 * returns 0x11 in byte 0 if no sensor is connected
 					 */
-#define CTL_GET_VOLT		0x12	/*
+    CTL_GET_VOLT=0x12,	/*
 					 * send: byte 1 is rail number: 0 = 12v, 1 = 5v, 2 = 3.3v
 					 * rcv:  returns millivolt in bytes 1,2
 					 * returns error 0x10 if request is invalid
 					 */
-#define CTL_GET_FAN_CNCT	0x20	/*
+    CTL_GET_FAN_CNCT=0x20,	/*
 					 * returns in bytes 1-6 for each fan:
 					 * 0 not connected
 					 * 1 3pin
 					 * 2 4pin
 					 */
-#define CTL_GET_FAN_RPM		0x21	/*
+    CTL_GET_FAN_RPM=0x21,	/*
 					 * send: byte 1 is channel, rest zero
 					 * rcv:  returns rpm in bytes 1,2
 					 */
-#define CTL_GET_FAN_PWM		0x22	/*
+    CTL_GET_FAN_PWM=0x22,	/*
 					 * send: byte 1 is channel, rest zero
 					 * rcv:  returns pwm in byte 1 if it was set
 					 *	 returns error 0x12 if fan is controlled via
 					 *	 fan_target or fan curve
 					 */
-#define CTL_SET_FAN_FPWM	0x23	/*
+    CTL_SET_FAN_FPWM=0x23,	/*
 					 * set fixed pwm
 					 * send: byte 1 is fan number
 					 * send: byte 2 is percentage from 0 - 100
 					 */
-#define CTL_SET_FAN_TARGET	0x24	/*
+    CTL_SET_FAN_TARGET=0x24,	/*
 					 * set target rpm
 					 * send: byte 1 is fan number
 					 * send: byte 2-3 is target
 					 * device accepts all values from 0x00 - 0xFFFF
 					 */
 
-#define NUM_FANS		6
-#define NUM_TEMP_SENSORS	4
+    CTL_FAN_MODE_READ = 0x29, /* CMD 29 01 05 00, RESP 00 02 05 00 */
+    //taken from OpenCorsairLink --device 0 --led channel=1,mode=4(rainbow),speed=1,strip_type=0x24(led per strip),strip_count=0
+    CTL_LED_CONFIGURE_0x35 = 0x35,    /* CMD:
+                             * 35 01 00 24 00 01 00 00 ff
+                             * ff 00 00 ff 80 00 ff ff 00
+                             * 00 23 00 2d 00 37 00 00 00
+                             * RESP 00 */
+    /*
+    commands[0x00] = 0x35;
+    commands[0x01] = ctrl->channel; // CLNP led_channel
+    commands[0x02] = ctrl->strip_count * 10;
+    commands[0x03] = ctrl->leds_per_strip; // 0x0A = LED Strip, 0x0C = HD Fan, 0x01 = SP Fan, 0x04 = ML Fan
+    commands[0x04] = ctrl->mode;
+    commands[0x05] = ctrl->speed;
+    commands[0x06] = ctrl->direction;
+    commands[0x07] = ctrl->color_change_style;
+    commands[0x08] = 0xFF;
+    commands[0x09] = ctrl->led_colors[0].red;
+    commands[0x0A] = ctrl->led_colors[0].green;
+    commands[0x0B] = ctrl->led_colors[0].blue;
+    commands[0x0C] = ctrl->led_colors[1].red;
+    commands[0x0D] = ctrl->led_colors[1].green;
+    commands[0x0E] = ctrl->led_colors[1].blue;
+    commands[0x0F] = ctrl->led_colors[2].red;
+    commands[0x10] = ctrl->led_colors[2].green;
+    commands[0x11] = ctrl->led_colors[2].blue;
+    commands[0x12] = ( ctrl->temperatures[0] >> 8 );
+    commands[0x13] = ( ctrl->temperatures[0] & 0xFF );
+    commands[0x14] = ( ctrl->temperatures[1] >> 8 );
+    commands[0x15] = ( ctrl->temperatures[1] & 0xFF );
+    commands[0x16] = ( ctrl->temperatures[2] >> 8 );
+    commands[0x17] = ( ctrl->temperatures[2] & 0xFF );
+}*/
+    CTL_LED_GROUP_RESET = 0x37, /* CMD 37 01 00, RESP 00 */
+};
+
 
 struct ccp_device {
 	struct hid_device *hdev;
@@ -106,29 +143,43 @@ static int ccp_get_errno(struct ccp_device *ccp)
 }
 
 /* send command, check for error in response, response in ccp->buffer */
+static int send_usb_cmd_from_buf(struct ccp_device *ccp, u8* cmdbuf, int cmdbuflen)
+{
+    unsigned long t;
+    int ret;
+    size_t to_copy;
+    to_copy = min(cmdbuflen, OUT_BUFFER_SIZE);
+
+    memset(ccp->buffer, 0x00, OUT_BUFFER_SIZE);
+    memcpy(ccp->buffer, cmdbuf, to_copy);
+
+    reinit_completion(&ccp->wait_input_report);
+
+    ret = hid_hw_output_report(ccp->hdev, ccp->buffer, OUT_BUFFER_SIZE);
+    if (ret < 0)
+        return ret;
+
+    t = wait_for_completion_timeout(&ccp->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
+    if (!t)
+        return -ETIMEDOUT;
+
+    return ccp_get_errno(ccp);
+}
+
+/* send command, check for error in response, response in ccp->buffer */
 static int send_usb_cmd(struct ccp_device *ccp, u8 command, u8 byte1, u8 byte2, u8 byte3)
 {
-	unsigned long t;
-	int ret;
-
-	memset(ccp->buffer, 0x00, OUT_BUFFER_SIZE);
-	ccp->buffer[0] = command;
-	ccp->buffer[1] = byte1;
-	ccp->buffer[2] = byte2;
-	ccp->buffer[3] = byte3;
-
-	reinit_completion(&ccp->wait_input_report);
-
-	ret = hid_hw_output_report(ccp->hdev, ccp->buffer, OUT_BUFFER_SIZE);
-	if (ret < 0)
-		return ret;
-
-	t = wait_for_completion_timeout(&ccp->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
-	if (!t)
-		return -ETIMEDOUT;
-
-	return ccp_get_errno(ccp);
+    u8 buf[4];
+    size_t buf_size = sizeof(buf);
+	memset(buf, 0x00, buf_size);
+	buf[0] = command;
+	buf[1] = byte1;
+	buf[2] = byte2;
+	buf[3] = byte3;
+	return send_usb_cmd_from_buf(ccp, buf, buf_size);
 }
+
+
 
 static int ccp_raw_event(struct hid_device *hdev, struct hid_report *report, u8 *data, int size)
 {
