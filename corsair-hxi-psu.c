@@ -9,52 +9,6 @@
  * still being used. The device does not use report ids. When using hidraw and this driver
  * simultaneously, reports could be switched.
  */
-/*
- * Reference:
- * Checking USB device 17 (1b1c:1c06)...
-Corsair product detected. Checking if corsair_device is HX850i... Dev=1, CorsairLink Device Found: HX850i!
-DEBUG: scan done, start routines
-DEBUG: selected device_number = 1
-DEBUG: shortcuts set
-DEBUG: init done
-Vendor: CORSAIR
-Product: HX850i
-Firmware: NA
-DEBUG: string done
-03 8D C3 F0 00 00
-Temperature 0: 50.16 C
-03 8E 9C F0 00 00
-Temperature 1: 40.18 C
-Powered: 33776986 (390d.  22h)
-Uptime: 8929786 (103d.  8h)
-DEBUG: time done
-03 88 E6 F8 00 00
-Supply Voltage: 115.00 V
-03 EE 6D 08 00 00
-Total Watts: 220.00 W
-DEBUG: supply done
-Output 12v:
-03 8B 09 D3 00 00
-	Voltage 12.16 V
-03 8C 3D F0 00 00
-	Amps 15.50 A
-03 96 5C 08 00 00
-	Watts 184.00 W
-Output 5v:
-03 8B 40 D1 00 00
-	Voltage  5.00 V
-03 8C 43 E0 00 00
-	Amps  4.25 A
-03 96 29 F8 00 00
-	Watts 21.00 W
-Output 3.3v:
-03 8B D2 D0 00 00
-	Voltage  3.28 V
-03 8C 35 E0 00 00
-	Amps  3.38 A
-03 96 15 F8 00 00
-	Watts 11.00 W
- */
 
 #include <linux/bitops.h>
 #include <linux/completion.h>
@@ -73,9 +27,35 @@ Output 3.3v:
 #define IN_BUFFER_SIZE		16
 #define LABEL_LENGTH		11
 #define REQ_TIMEOUT		300
+#define NUM_RAILS 4
 
-#define NUM_FANS 1
-#define NUM_TEMP_SENSORS 2
+struct hxi_fan {
+    bool mode; //0 for HW ctrl, 1 for SW ctrl
+    u8 duty_cycle;
+};
+
+enum hxi_sensor_id {
+    SENSOR_12V = 0x0,
+    SENSOR_5V  = 0x1,
+    SENSOR_3V = 0x2,
+    UNSWITCHED = 0xFE // do not send a sensor switch msg
+};
+
+enum hxi_sensor_cmd {
+    SIG_VOLTS = 0x8B,
+    SIG_WALL_VOLTS = 0x88,
+    SIG_AMPS  = 0x8C,
+    SIG_WATTS = 0x96,
+    SIG_TOTAL_WATTS = 0xEE,
+};
+
+struct hxi_rail {
+    enum hxi_sensor_id sensor;
+    enum hxi_sensor_cmd volt_cmd;
+    enum hxi_sensor_cmd amp_cmd;
+    enum hxi_sensor_cmd power_cmd;
+    char label[LABEL_LENGTH];
+};
 
 struct hxi_device {
 	struct hid_device *hdev;
@@ -83,10 +63,8 @@ struct hxi_device {
 	struct completion wait_input_report;
 	struct mutex mutex; /* whenever buffer is used, lock before send_usb_cmd */
 	u8 *buffer;
-	int target[6];
-	DECLARE_BITMAP(temp_cnct, NUM_TEMP_SENSORS);
-	DECLARE_BITMAP(fan_cnct, NUM_FANS);
-	char fan_label[6][LABEL_LENGTH];
+	struct hxi_fan fan;
+	struct hxi_rail rails[4];
 };
 
 /* converts response error in buffer to errno */
@@ -126,13 +104,10 @@ static int send_usb_cmd(struct hxi_device *hxi, u8 command, u8 byte1, u8 byte2, 
 
 	ret = hid_hw_output_report(hxi->hdev, hxi->buffer, OUT_BUFFER_SIZE);
 	if (ret < 0) {
-        pr_info("output report response error: %d", ret);
         return ret;
     }
-    pr_info("output report response got bytes: %d", ret);
 	t = wait_for_completion_timeout(&hxi->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
 	if (!t) {
-        pr_info("timeout", ret);
         return -ETIMEDOUT;
     }
 
@@ -153,7 +128,6 @@ static int hxi_raw_event(struct hid_device *hdev, struct hid_report *report, u8 
 	return 0;
 }
 
-
 static int get_temperature(struct hxi_device *hxi, int channel) {
     int ret;
     const u8 get_temp_cmd = 0x8D;
@@ -163,7 +137,6 @@ static int get_temperature(struct hxi_device *hxi, int channel) {
 
     ret = send_usb_cmd(hxi, len, cmd, 0, 0);
     if (ret) { //failure
-        pr_info("bad getTemp: %x", ret);
         ret = -ENODATA;
     }
     else { //success
@@ -173,57 +146,33 @@ static int get_temperature(struct hxi_device *hxi, int channel) {
     return ret;
 }
 
-enum hxi_sensor_id {
-    SENSOR_12V = 0x0,
-    SENSOR_5V  = 0x1,
-    SENSOR_3V3 = 0x2,
-    SENSOR_TOTAL = 0xFE // do not send
-};
-
-enum hxi_sensor_signal {
-    SIG_VOLTS = 0x8B,
-    SIG_WALL_VOLTS = 0x88,
-    SIG_AMPS  = 0x8C,
-    SIG_WATTS = 0x96,
-    SIG_TOTAL_WATTS = 0xEE,
-};
-
 static int decode_corsair_float(uint16_t v16 )
 {
     int ret;
     int exponent = v16 >> 11;
     int fraction = (int)( v16 & 2047 );
-    if ( exponent > 15 )
-        exponent = -( 32 - exponent );
 
-    if ( fraction > 1023 )
-        fraction = -( 2048 - fraction );
-
-    if ( ( fraction & 1 ) == 1 )
-        fraction++;
-
+    if (exponent > 15) { exponent = -( 32 - exponent ); }
+    if (fraction > 1023) { fraction = -( 2048 - fraction ); }
+    if (fraction & 1) { fraction++; }
     fraction = fraction * 1000; // fix unit scaling, maintain precision before shifts
-    if( exponent < 0) {
-        ret = fraction >> ((~exponent)+1);
-    }
-    else {
-        ret = fraction << exponent;
-    }
+    if(exponent < 0) { ret = fraction >> ((~exponent)+1); }
+    else { ret = fraction << exponent; }
     return ret;
 }
 
 /* requests and returns single data values depending on channel */
-static int get_electric_data(struct hxi_device *hxi, enum hxi_sensor_id sensor, enum hxi_sensor_signal sig)
+static int get_electric_data(struct hxi_device *hxi, enum hxi_sensor_id sensor, enum hxi_sensor_cmd sig)
 {
 	int ret;
 	mutex_lock(&hxi->mutex);
     switch (sensor) {
         case SENSOR_12V:
         case SENSOR_5V:
-        case SENSOR_3V3:
+        case SENSOR_3V:
             ret = send_usb_cmd(hxi, 0x02, 0x0, sensor, 0);
             break;
-        case SENSOR_TOTAL:
+        case UNSWITCHED:
             ret = 0;
             break;
         default:
@@ -231,7 +180,6 @@ static int get_electric_data(struct hxi_device *hxi, enum hxi_sensor_id sensor, 
             break;
     }
     if (ret) {
-        pr_info("bad error1: %x", ret);
         goto out_unlock;
     }
     switch (sig) {
@@ -247,7 +195,6 @@ static int get_electric_data(struct hxi_device *hxi, enum hxi_sensor_id sensor, 
             break;
     }
     if (ret) {
-        pr_info("bad error2: %x", ret);
         goto out_unlock;
     }
     //this is different byte order from temperature. Corsair, why?
@@ -258,16 +205,18 @@ out_unlock:
 	return decode_corsair_float(ret);
 }
 
-static int hxi_read_string(struct device *dev, enum hwmon_sensor_types type,
-			   u32 attr, int channel, const char **str)
+static int hxi_read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, const char **str)
 {
 	struct hxi_device *hxi = dev_get_drvdata(dev);
 
 	switch (type) {
-	case hwmon_fan:
+	case hwmon_in:
+	case hwmon_curr:
+	case hwmon_power:
 		switch (attr) {
-		case hwmon_fan_label:
-			*str = hxi->fan_label[channel];
+		case hwmon_in_label: //includes current as well
+		case hwmon_power_label:
+			*str = hxi->rails[channel].label;
 			return 0;
 		default:
 			break;
@@ -280,8 +229,7 @@ static int hxi_read_string(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 }
 
-static int hxi_read(struct device *dev, enum hwmon_sensor_types type,
-		    u32 attr, int channel, long *val)
+static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long *val)
 {
 	struct hxi_device *hxi = dev_get_drvdata(dev);
 	int ret;
@@ -303,20 +251,7 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type,
     case hwmon_in:
         switch (attr) {
             case hwmon_in_input:
-                switch(channel) {
-                    case 0:
-                        ret = get_electric_data(hxi, SENSOR_12V, SIG_VOLTS);
-                        break;
-                    case 1:
-                        ret = get_electric_data(hxi, SENSOR_5V, SIG_VOLTS);
-                        break;
-                    case 2:
-                        ret = get_electric_data(hxi, SENSOR_3V3, SIG_VOLTS);
-                        break;
-                    case 3:
-                        ret = get_electric_data(hxi, SENSOR_TOTAL, SIG_WALL_VOLTS);
-                        break;
-                }
+                ret = get_electric_data(hxi, hxi->rails[channel].sensor, hxi->rails[channel].volt_cmd);
                 if (ret < 0) {
                     return ret;
                 }
@@ -329,17 +264,7 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type,
     case hwmon_curr:
         switch (attr) {
             case hwmon_in_input:
-                switch(channel) {
-                    case 0:
-                        ret = get_electric_data(hxi, SENSOR_12V, SIG_AMPS);
-                        break;
-                    case 1:
-                        ret = get_electric_data(hxi, SENSOR_5V, SIG_AMPS);
-                        break;
-                    case 2:
-                        ret = get_electric_data(hxi, SENSOR_3V3, SIG_AMPS);
-                        break;
-                }
+                ret = get_electric_data(hxi, hxi->rails[channel].sensor, hxi->rails[channel].amp_cmd);
                 if (ret < 0) {
                     return ret;
                 }
@@ -352,20 +277,7 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type,
     case hwmon_power:
             switch (attr) {
                 case hwmon_in_input:
-                    switch(channel) {
-                        case 0:
-                            ret = get_electric_data(hxi, SENSOR_12V, SIG_WATTS);
-                            break;
-                        case 1:
-                            ret = get_electric_data(hxi, SENSOR_5V, SIG_WATTS);
-                            break;
-                        case 2:
-                            ret = get_electric_data(hxi, SENSOR_3V3, SIG_WATTS);
-                            break;
-                        case 3:
-                            ret = get_electric_data(hxi, SENSOR_TOTAL, SIG_TOTAL_WATTS);
-                            break;
-                    }
+                    ret = get_electric_data(hxi, hxi->rails[channel].sensor, hxi->rails[channel].power_cmd);
                     if (ret < 0) {
                         return ret;
                     }
@@ -415,20 +327,11 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 };
 
-static int hxi_write(struct device *dev, enum hwmon_sensor_types type,
-		     u32 attr, int channel, long val)
+static int hxi_write(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long val)
 {
 	struct hxi_device *hxi = dev_get_drvdata(dev);
 
 	switch (type) {
-	case hwmon_pwm:
-		switch (attr) {
-		case hwmon_pwm_input:
-			return -1; //set_pwm(hxi, channel, val);
-		default:
-			break;
-		}
-		break;
 	case hwmon_fan:
 		switch (attr) {
 		case hwmon_fan_target:
@@ -436,6 +339,7 @@ static int hxi_write(struct device *dev, enum hwmon_sensor_types type,
 		default:
 			break;
 		}
+		break;
 	default:
 		break;
 	}
@@ -466,9 +370,23 @@ static const struct hwmon_channel_info *hxi_info[] = {
 //	HWMON_CHANNEL_INFO(pwm,
 //			   HWMON_PWM_INPUT
 //			   ),
-	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT, HWMON_I_INPUT, HWMON_I_INPUT, HWMON_I_INPUT),
-    HWMON_CHANNEL_INFO(curr, HWMON_I_INPUT, HWMON_I_INPUT, HWMON_I_INPUT),
-    HWMON_CHANNEL_INFO(power, HWMON_I_INPUT, HWMON_I_INPUT, HWMON_I_INPUT, HWMON_I_INPUT),
+	HWMON_CHANNEL_INFO(in,
+                    HWMON_I_INPUT | HWMON_I_LABEL,
+                    HWMON_I_INPUT | HWMON_I_LABEL,
+                    HWMON_I_INPUT | HWMON_I_LABEL,
+                    HWMON_I_INPUT | HWMON_I_LABEL
+                    ),
+    HWMON_CHANNEL_INFO(curr,
+                       HWMON_I_INPUT | HWMON_I_LABEL,
+                       HWMON_I_INPUT | HWMON_I_LABEL,
+                       HWMON_I_INPUT | HWMON_I_LABEL
+    ),
+    HWMON_CHANNEL_INFO(power,
+                       HWMON_I_INPUT | HWMON_P_LABEL,
+                       HWMON_I_INPUT | HWMON_P_LABEL,
+                       HWMON_I_INPUT | HWMON_P_LABEL,
+                       HWMON_I_INPUT | HWMON_P_LABEL
+    ),
 	NULL
 };
 
@@ -481,6 +399,7 @@ static int hxi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct hxi_device *hxi;
 	int ret;
+	int i;
 
 	hxi = devm_kzalloc(&hdev->dev, sizeof(*hxi), GFP_KERNEL);
 	if (!hxi)
@@ -489,6 +408,23 @@ static int hxi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	hxi->buffer = devm_kmalloc(&hdev->dev, OUT_BUFFER_SIZE, GFP_KERNEL);
 	if (!hxi->buffer)
 		return -ENOMEM;
+
+	for(i = 0; i < NUM_RAILS-1; i++) {
+        hxi->rails[i].volt_cmd = SIG_VOLTS;
+        hxi->rails[i].amp_cmd = SIG_AMPS;
+        hxi->rails[i].power_cmd = SIG_WATTS;
+	}
+	hxi->rails[0].sensor = SENSOR_12V;
+    hxi->rails[1].sensor = SENSOR_5V;
+    hxi->rails[2].sensor = SENSOR_3V;
+    hxi->rails[3].sensor = UNSWITCHED;
+    hxi->rails[3].volt_cmd = SIG_WALL_VOLTS;
+    hxi->rails[3].power_cmd = SIG_TOTAL_WATTS;
+
+	strcpy(hxi->rails[0].label, "12V");
+    strcpy(hxi->rails[1].label, "5V");
+    strcpy(hxi->rails[2].label, "3V");
+    strcpy(hxi->rails[3].label, "Wall");
 
 	ret = hid_parse(hdev);
 	if (ret)
