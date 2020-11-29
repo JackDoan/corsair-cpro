@@ -29,11 +29,6 @@
 #define REQ_TIMEOUT		300
 #define NUM_RAILS 4
 
-struct hxi_fan {
-    bool mode; //0 for HW ctrl, 1 for SW ctrl
-    u8 duty_cycle;
-};
-
 enum hxi_sensor_id {
     SENSOR_12V = 0x0,
     SENSOR_5V  = 0x1,
@@ -63,7 +58,6 @@ struct hxi_device {
 	struct completion wait_input_report;
 	struct mutex mutex; /* whenever buffer is used, lock before send_usb_cmd */
 	u8 *buffer;
-	struct hxi_fan fan;
 	struct hxi_rail rails[4];
 };
 
@@ -287,20 +281,6 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
                     break;
             }
             break;
-
-//	case hwmon_pwm:
-//		switch (attr) {
-//		case hwmon_pwm_input:
-//			ret = -1; //get_electric_data(hxi, CTL_GET_FAN_PWM, channel, false);
-//			if (ret < 0)
-//				return ret;
-//			*val = DIV_ROUND_CLOSEST(ret * 255, 100);
-//			return 0;
-//		default:
-//			break;
-//		}
-//		break;
-
 	default:
 		break;
 	}
@@ -310,19 +290,6 @@ static int hxi_read(struct device *dev, enum hwmon_sensor_types type, u32 attr, 
 
 static int hxi_write(struct device *dev, enum hwmon_sensor_types type, u32 attr, int channel, long val)
 {
-	//struct hxi_device *hxi = dev_get_drvdata(dev);
-	switch (type) {
-	case hwmon_fan:
-		switch (attr) {
-		case hwmon_fan_target:
-			return -EOPNOTSUPP;
-		default:
-			break;
-		}
-		break;
-	default:
-		break;
-	}
 	return -EOPNOTSUPP;
 };
 
@@ -341,14 +308,9 @@ static const struct hwmon_ops hxi_hwmon_ops = {
 static const struct hwmon_channel_info *hxi_info[] = {
 	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
 	HWMON_CHANNEL_INFO(temp,
-			   HWMON_T_INPUT, HWMON_T_INPUT
-			   ),
-//	HWMON_CHANNEL_INFO(fan,
-//			   HWMON_F_INPUT | HWMON_F_LABEL | HWMON_F_TARGET
-//			   ),
-//	HWMON_CHANNEL_INFO(pwm,
-//			   HWMON_PWM_INPUT
-//			   ),
+                        HWMON_T_INPUT,
+                        HWMON_T_INPUT
+                        ),
 	HWMON_CHANNEL_INFO(in,
                     HWMON_I_INPUT | HWMON_I_LABEL,
                     HWMON_I_INPUT | HWMON_I_LABEL,
@@ -381,12 +343,14 @@ static int hxi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	int i;
 
 	hxi = devm_kzalloc(&hdev->dev, sizeof(*hxi), GFP_KERNEL);
-	if (!hxi)
-		return -ENOMEM;
+	if (!hxi) {
+        return -ENOMEM;
+	}
 
 	hxi->buffer = devm_kmalloc(&hdev->dev, OUT_BUFFER_SIZE, GFP_KERNEL);
-	if (!hxi->buffer)
-		return -ENOMEM;
+	if (!hxi->buffer) {
+        return -ENOMEM;
+	}
 
 	for(i = 0; i < NUM_RAILS-1; i++) {
         hxi->rails[i].volt_cmd = SIG_VOLTS;
