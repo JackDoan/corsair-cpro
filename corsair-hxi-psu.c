@@ -5,9 +5,24 @@
  * Copyright (C) 2020 Marius Zachmann <mail@mariuszachmann.de>
  * Copyright (C) 2017-2019  Sean Nelson <audiohacked@gmail.com>
  *
+ * Supported devices:
+ * Corsair HXi (HX750i, HX850i, HX1000i and HX1200i)
+ *
  * This driver uses hid reports to communicate with the device to allow hidraw userspace drivers
  * still being used. The device does not use report ids. When using hidraw and this driver
  * simultaneously, reports could be switched.
+ *
+ * Broadly speaking, this power supply communicates with a sort of PMBUS-over-USBHID protocol.
+ * Support has been added for reading:
+ *      * both temperature sensors
+ *      * voltage, current, and power for 12V, 5V, 3.3V rails
+ *      * input (wall) voltage
+ *      * total input (wall) power
+ * Supposedly, the PSU supports the following functionality that is not yet supported by this driver:
+ *      * changing the fan control mode from automatic to manual
+ *      * setting fan speed
+ *      * reading/writing different overcurrent-protection modes
+ *
  */
 
 #include <linux/bitops.h>
@@ -20,8 +35,14 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Jack Doan <me@jackdoan.com>");
+
 #define USB_VENDOR_ID_CORSAIR			0x1b1c
+#define USB_PRODUCT_ID_CORSAIR_HX750i	0x1c05
 #define USB_PRODUCT_ID_CORSAIR_HX850i	0x1c06
+#define USB_PRODUCT_ID_CORSAIR_HX1000i	0x1c07
+#define USB_PRODUCT_ID_CORSAIR_HX1200i	0x1c08
 
 #define OUT_BUFFER_SIZE		63
 #define IN_BUFFER_SIZE		16
@@ -414,8 +435,10 @@ static void hxi_remove(struct hid_device *hdev)
 }
 
 static const struct hid_device_id hxi_devices[] = {
-	{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX850i) },
-	//{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_1000D) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX750i) },
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX850i) },
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX1000i) },
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX1200i) },
 	{ }
 };
 
@@ -428,7 +451,6 @@ static struct hid_driver hxi_driver = {
 };
 
 MODULE_DEVICE_TABLE(hid, hxi_devices);
-MODULE_LICENSE("GPL");
 
 static int __init hxi_init(void)
 {
